@@ -1,27 +1,17 @@
-import React, { useEffect, useState, useMemo } from "react";
+// path: src/App.jsx
+import React, { useEffect, useMemo, useState } from "react";
+import { initializeApp, getApp, getApps } from "firebase/app";
 import {
-  initializeApp,
-  getApps,
-  getApp,
-} from "firebase/app";
-import {
-  getFirestore,
-  collection,
-  doc,
-  setDoc,
-  updateDoc,
-  deleteDoc,
-  onSnapshot,
+  getFirestore, collection, doc, setDoc, updateDoc, deleteDoc, onSnapshot,
 } from "firebase/firestore";
 import {
-  getAuth,
-  signInWithEmailAndPassword,
-  signOut,
-  onAuthStateChanged,
+  getAuth, onAuthStateChanged, signInWithEmailAndPassword, signOut,
+  createUserWithEmailAndPassword, sendPasswordResetEmail,
 } from "firebase/auth";
-import * as XLSX from "xlsx";
+import ExcelJS from "exceljs";
 import "./App.css";
 
+// ===== Firebase =====
 const firebaseConfig = {
   apiKey: "AIzaSyCHv-swPrzkKKQxuB0nZG-jQ4s4ecrbLUw",
   authDomain: "web-4de0f.firebaseapp.com",
@@ -30,741 +20,693 @@ const firebaseConfig = {
   messagingSenderId: "766258113961",
   appId: "1:766258113961:web:b085d899d1d640998fa8b8",
 };
+const REPORT_CODE = "HC-TE-001";
 
-function getCurrentMonth() {
+const getCurrentMonth = () => {
   const d = new Date();
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
-}
+};
+const getDaysInMonth = (ym) => {
+  const [y, m] = ym.split("-").map(Number);
+  if (!y || !m) return 31;
+  return new Date(y, m, 0).getDate();
+};
+const sanitizeSheetName = (base, used) => {
+  let name = (base || "Sheet").replace(/[\\/?*\[\]:]/g, " ").trim();
+  if (!name) name = "Sheet";
+  name = name.slice(0, 31);
+  let i = 1;
+  const raw = name;
+  while (used.has(name)) {
+    const suffix = ` (${i++})`;
+    name = (raw.slice(0, 31 - suffix.length) + suffix).slice(0, 31);
+  }
+  used.add(name);
+  return name;
+};
 
 export default function SalaryApp() {
+  // Core
   const [db, setDb] = useState(null);
   const [auth, setAuth] = useState(null);
   const [user, setUser] = useState(null);
+
+  // Settings
   const [month, setMonth] = useState(getCurrentMonth());
+  const [daysInMonth, setDaysInMonth] = useState(getDaysInMonth(getCurrentMonth()));
+  const [pricePerBook, setPricePerBook] = useState(3.5); // nghìn VND
+
+  // Data
   const [employees, setEmployees] = useState([]);
   const [classes, setClasses] = useState([]);
   const [entries, setEntries] = useState([]);
-  const [pricePerBook, setPricePerBook] = useState(3.5);
-  
-  // Form states
+
+  // Auth UI
+  const [isSignup, setIsSignup] = useState(false);
+  const [loadingAuth, setLoadingAuth] = useState(false);
+  const [authMsg, setAuthMsg] = useState("");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [regEmail, setRegEmail] = useState("");
+  const [regPassword, setRegPassword] = useState("");
+  const [regConfirm, setRegConfirm] = useState("");
+
+  // Forms
   const [newEmployeeName, setNewEmployeeName] = useState("");
   const [newSchoolName, setNewSchoolName] = useState("");
-  const [selectedSchoolForClass, setSelectedSchoolForClass] = useState(""); // Dropdown cho trường
+  const [selectedSchoolForClass, setSelectedSchoolForClass] = useState("");
   const [newClassName, setNewClassName] = useState("");
-  
-  // Entry form states
+
+  // Entry form
   const [selectedEmployee, setSelectedEmployee] = useState("");
   const [selectedDay, setSelectedDay] = useState("");
   const [selectedSchool, setSelectedSchool] = useState("");
   const [inputClass, setInputClass] = useState("");
   const [inputBooks, setInputBooks] = useState("");
   const [inputNote, setInputNote] = useState("");
-  
-  // Modal state
-  const [detailModal, setDetailModal] = useState(null); // {day, school}
-  
-  // Filter state
-  const [filterEmployee, setFilterEmployee] = useState(""); // Filter by employee
-  
-  // Batch delete state
-  const [selectedEntries, setSelectedEntries] = useState(new Set()); // Set of entry IDs
-  
-  const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
 
-  // ==== INIT FIREBASE ====
+  // UI
+  const [detailModal, setDetailModal] = useState(null);
+  const [selectedEntries, setSelectedEntries] = useState(new Set());
+  const [filterEmployee, setFilterEmployee] = useState("");
+
+  // ==== INIT ====
   useEffect(() => {
     const app = getApps().length ? getApp() : initializeApp(firebaseConfig);
     setDb(getFirestore(app));
     setAuth(getAuth(app));
   }, []);
-
-  // ==== AUTH ====
   useEffect(() => {
     if (!auth) return;
     const unsub = onAuthStateChanged(auth, (u) => setUser(u));
     return () => unsub();
   }, [auth]);
+  useEffect(() => {
+    setDaysInMonth(getDaysInMonth(month));
+    if (selectedDay && Number(selectedDay) > getDaysInMonth(month)) setSelectedDay("");
+  }, [month]); // why: co dãn số ngày theo tháng
 
+  // ==== AUTH ====
   const login = async () => {
+    setAuthMsg("");
+    if (!email || !password) return setAuthMsg("⚠️ Nhập email & mật khẩu.");
+    setLoadingAuth(true);
     try {
-      await signInWithEmailAndPassword(auth, email, password);
+      await signInWithEmailAndPassword(auth, email.trim(), password);
     } catch {
-      alert("❌ Sai tài khoản hoặc mật khẩu!");
+      setAuthMsg("❌ Sai tài khoản hoặc mật khẩu.");
+    } finally {
+      setLoadingAuth(false);
     }
   };
-  const logout = async () => await signOut(auth);
+  const register = async () => {
+    setAuthMsg("");
+    if (!regEmail || !regPassword || !regConfirm) return setAuthMsg("⚠️ Điền đủ thông tin.");
+    if (regPassword.length < 6) return setAuthMsg("⚠️ Mật khẩu ≥ 6 ký tự.");
+    if (regPassword !== regConfirm) return setAuthMsg("⚠️ Xác nhận không khớp.");
+    setLoadingAuth(true);
+    try {
+      const cred = await createUserWithEmailAndPassword(auth, regEmail.trim(), regPassword);
+      try {
+        await setDoc(doc(getFirestore(), "users", cred.user.uid), { email: cred.user.email, createdAt: Date.now() }, { merge: true });
+      } catch {
+        // why: không làm hỏng flow đăng ký nếu ghi user profile phụ bị lỗi
+      }
+      setAuthMsg("✅ Đăng ký thành công! Vui lòng đăng nhập.");
+      setIsSignup(false);
+      setEmail(regEmail.trim());
+      setRegEmail(""); setRegPassword(""); setRegConfirm("");
+    } catch {
+      setAuthMsg("❌ Không thể đăng ký (email có thể đã tồn tại).");
+    } finally {
+      setLoadingAuth(false);
+    }
+  };
+  const resetPassword = async () => {
+    setAuthMsg("");
+    if (!email) return setAuthMsg("⚠️ Nhập email để đặt lại mật khẩu.");
+    setLoadingAuth(true);
+    try {
+      await sendPasswordResetEmail(auth, email.trim());
+      setAuthMsg("✉️ Đã gửi email đặt lại mật khẩu.");
+    } catch {
+      setAuthMsg("❌ Không thể gửi email đặt lại.");
+    } finally {
+      setLoadingAuth(false);
+    }
+  };
+  const logout = async () => signOut(auth);
 
-  // ==== FIRESTORE LISTEN ====
+  // ==== FIRESTORE ====
   useEffect(() => {
     if (!db || !user) return;
-    
-    // Listen to employees
-    const empPath = `users/${user.uid}/employees`;
-    const unsubEmp = onSnapshot(collection(db, empPath), (snap) => {
-      const data = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
-      setEmployees(data);
+    const unsubEmp = onSnapshot(collection(db, `users/${user.uid}/employees`), (snap) => {
+      setEmployees(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
     });
-    
-    // Listen to classes
-    const classPath = `users/${user.uid}/months/${month}/classes`;
-    const unsubClass = onSnapshot(collection(db, classPath), (snap) => {
-      const data = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
-      setClasses(data);
+    const unsubClass = onSnapshot(collection(db, `users/${user.uid}/months/${month}/classes`), (snap) => {
+      setClasses(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
     });
-    
-    // Listen to entries
-    const entryPath = `users/${user.uid}/months/${month}/entries`;
-    const unsubEntry = onSnapshot(collection(db, entryPath), (snap) => {
+    const unsubEntry = onSnapshot(collection(db, `users/${user.uid}/months/${month}/entries`), (snap) => {
       const data = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
-      setEntries(data.sort((a, b) => {
-        // Sort by day desc, then by timestamp desc
-        if (a.day !== b.day) return b.day - a.day;
-        return (b.timestamp || 0) - (a.timestamp || 0);
-      }));
+      setEntries(data.sort((a, b) => (a.day !== b.day ? b.day - a.day : (b.timestamp || 0) - (a.timestamp || 0))));
     });
-    
-    return () => {
-      unsubEmp();
-      unsubClass();
-      unsubEntry();
-    };
+    return () => { unsubEmp(); unsubClass(); unsubEntry(); };
   }, [db, month, user]);
 
-  // ==== COMPUTED DATA ====
+  // ==== COMPUTED ====
   const schools = useMemo(() => {
     const unique = [...new Set(classes.map((c) => c.school).filter(Boolean))];
     return unique.sort();
   }, [classes]);
 
-  // Get classes for selected school
   const classesForSelectedSchool = useMemo(() => {
     if (!selectedSchool) return [];
-    return classes
-      .filter((c) => c.school === selectedSchool)
-      .map((c) => c.name)
-      .sort();
+    return classes.filter((c) => c.school === selectedSchool).map((c) => c.name).sort();
   }, [classes, selectedSchool]);
 
-  // Filter entries by employee if filter is set
   const filteredEntries = useMemo(() => {
     if (!filterEmployee) return entries;
     return entries.filter((e) => e.employee === filterEmployee);
   }, [entries, filterEmployee]);
 
-  // Calculate summary table from entries (with employee filter)
   const summaryTable = useMemo(() => {
-    const table = {}; // {school_class_day: books}
-    const detailMap = {}; // {school_class_day: [{employee, books, note}]}
-    
+    const table = {};
+    const detailMap = {};
     filteredEntries.forEach((entry) => {
       const key = `${entry.school}_${entry.class}_${entry.day}`;
-      if (!table[key]) {
-        table[key] = 0;
-        detailMap[key] = [];
-      }
+      if (!table[key]) { table[key] = 0; detailMap[key] = []; }
       table[key] += entry.books || 0;
-      detailMap[key].push({
-        employee: entry.employee,
-        books: entry.books || 0,
-        note: entry.note || "",
-      });
+      detailMap[key].push({ employee: entry.employee, books: entry.books || 0, note: entry.note || "" });
     });
-    
-    // Group by school-class
     const grouped = {};
     Object.keys(table).forEach((key) => {
       const [school, className, day] = key.split("_");
-      const groupKey = `${school}_${className}`;
-      if (!grouped[groupKey]) {
-        grouped[groupKey] = {
-          school,
-          class: className,
-          days: Array(31).fill(0),
-          details: Array(31).fill(null), // Store detail map for each day
-        };
-      }
-      const dayIndex = parseInt(day) - 1;
-      if (dayIndex >= 0 && dayIndex < 31) {
-        grouped[groupKey].days[dayIndex] = table[key];
-        grouped[groupKey].details[dayIndex] = detailMap[key];
-      }
+      const g = `${school}_${className}`;
+      if (!grouped[g]) grouped[g] = { school, class: className, days: Array(31).fill(0), details: Array(31).fill(null) };
+      const di = parseInt(day, 10) - 1;
+      if (di >= 0 && di < 31) { grouped[g].days[di] = table[key]; grouped[g].details[di] = detailMap[key]; }
     });
-    
     return Object.values(grouped);
   }, [filteredEntries]);
 
-  // Statistics by employee: which schools and how many classes
-  const employeeStats = useMemo(() => {
-    const stats = {};
-    entries.forEach((entry) => {
-      const emp = entry.employee;
-      if (!stats[emp]) {
-        stats[emp] = {
-          schools: new Set(),
-          classes: new Map(), // Map: school_class -> class info
-          totalBooks: 0,
-        };
-      }
-      if (entry.school) stats[emp].schools.add(entry.school);
-      if (entry.class && entry.school) {
-        const key = `${entry.school}_${entry.class}`;
-        if (!stats[emp].classes.has(key)) {
-          stats[emp].classes.set(key, {
-            school: entry.school,
-            className: entry.class,
-          });
-        }
-      }
-      stats[emp].totalBooks += entry.books || 0;
-    });
-    
-    return Object.keys(stats).map((emp) => {
-      const classList = Array.from(stats[emp].classes.values());
-      // Group classes by school for display
-      const classesBySchool = {};
-      classList.forEach((cls) => {
-        if (!classesBySchool[cls.school]) {
-          classesBySchool[cls.school] = [];
-        }
-        classesBySchool[cls.school].push(cls.className);
-      });
-      
-      return {
-        employee: emp,
-        schools: Array.from(stats[emp].schools),
-        classCount: stats[emp].classes.size,
-        classesBySchool: classesBySchool, // {school: [class1, class2, ...]}
-        totalBooks: stats[emp].totalBooks,
-      };
-    }).sort((a, b) => a.employee.localeCompare(b.employee));
-  }, [entries]);
-
-  // Calculate summary table for EACH employee separately
   const employeeSummaryTables = useMemo(() => {
     const tables = {};
-    
     employees.forEach((emp) => {
       const empEntries = entries.filter((e) => e.employee === emp.name);
       if (empEntries.length === 0) return;
-      
-      const table = {}; // {school_class_day: books}
-      const detailMap = {}; // {school_class_day: [{employee, books, note}]}
-      
+      const table = {};
       empEntries.forEach((entry) => {
         const key = `${entry.school}_${entry.class}_${entry.day}`;
-        if (!table[key]) {
-          table[key] = 0;
-          detailMap[key] = [];
-        }
+        if (!table[key]) table[key] = 0;
         table[key] += entry.books || 0;
-        detailMap[key].push({
-          employee: entry.employee,
-          books: entry.books || 0,
-          note: entry.note || "",
-        });
       });
-      
-      // Group by school-class
       const grouped = {};
       Object.keys(table).forEach((key) => {
         const [school, className, day] = key.split("_");
-        const groupKey = `${school}_${className}`;
-        if (!grouped[groupKey]) {
-          grouped[groupKey] = {
-            school,
-            class: className,
-            days: Array(31).fill(0),
-            details: Array(31).fill(null),
-          };
-        }
-        const dayIndex = parseInt(day) - 1;
-        if (dayIndex >= 0 && dayIndex < 31) {
-          grouped[groupKey].days[dayIndex] = table[key];
-          grouped[groupKey].details[dayIndex] = detailMap[key];
-        }
+        const k = `${school}_${className}`;
+        if (!grouped[k]) grouped[k] = { school, class: className, days: Array(31).fill(0) };
+        const di = parseInt(day, 10) - 1;
+        if (di >= 0 && di < 31) grouped[k].days[di] = table[key];
       });
-      
       tables[emp.name] = Object.values(grouped);
     });
-    
     return tables;
   }, [entries, employees]);
 
-  const totalBooks = useMemo(() => {
-    return summaryTable.reduce((sum, row) => {
-      return sum + row.days.reduce((a, b) => a + b, 0);
-    }, 0);
-  }, [summaryTable]);
+  const totalBooks = useMemo(() => summaryTable.reduce((s, r) => s + r.days.reduce((a, b) => a + b, 0), 0), [summaryTable]);
+  const totalMoney = useMemo(() => Math.round(totalBooks * pricePerBook * 1000), [totalBooks, pricePerBook]);
 
-  const totalMoney = useMemo(
-    () => Math.round(totalBooks * pricePerBook * 1000),
-    [totalBooks, pricePerBook]
-  );
-
-  // ==== CRUD OPERATIONS ====
+  // ==== CRUD ====
   const addEmployee = async () => {
-    if (!newEmployeeName.trim() || !user) return alert("⚠️ Vui lòng nhập tên nhân viên!");
+    if (!newEmployeeName.trim() || !user) return alert("⚠️ Nhập tên nhân viên!");
     const id = `emp_${Date.now()}`;
-    const ref = doc(db, `users/${user.uid}/employees`, id);
-    await setDoc(ref, { name: newEmployeeName.trim() });
+    await setDoc(doc(db, `users/${user.uid}/employees`, id), { name: newEmployeeName.trim() });
     setNewEmployeeName("");
   };
-
   const deleteEmployee = async (id) => {
-    if (window.confirm("🗑️ Xóa nhân viên này?")) {
-      await deleteDoc(doc(db, `users/${user.uid}/employees`, id));
-    }
+    if (window.confirm("🗑️ Xóa nhân viên này?")) await deleteDoc(doc(db, `users/${user.uid}/employees`, id));
   };
-
   const addClass = async () => {
     const schoolToAdd = selectedSchoolForClass || newSchoolName.trim();
-    if (!schoolToAdd || !newClassName.trim() || !user) 
-      return alert("⚠️ Vui lòng chọn/nhập trường và lớp!");
+    if (!schoolToAdd || !newClassName.trim() || !user) return alert("⚠️ Chọn/nhập trường và lớp!");
     const id = `class_${Date.now()}`;
-    const ref = doc(db, `users/${user.uid}/months/${month}/classes`, id);
-    await setDoc(ref, { 
-      school: schoolToAdd,
-      name: newClassName.trim(),
-    });
-    // Giữ nguyên trường đã chọn để tiếp tục thêm lớp, chỉ xóa tên lớp
-    setNewClassName("");
-    // Chỉ reset nếu dùng input text cho trường
-    if (!selectedSchoolForClass) {
-      setNewSchoolName("");
-    }
+    await setDoc(doc(db, `users/${user.uid}/months/${month}/classes`, id), { school: schoolToAdd, name: newClassName.trim() });
+    setNewClassName(""); if (!selectedSchoolForClass) setNewSchoolName("");
   };
-
   const deleteClass = async (id) => {
-    if (window.confirm("🗑️ Xóa lớp này?")) {
-      await deleteDoc(doc(db, `users/${user.uid}/months/${month}/classes`, id));
-    }
+    if (window.confirm("🗑️ Xóa lớp này?")) await deleteDoc(doc(db, `users/${user.uid}/months/${month}/classes`, id));
   };
-
   const addEntry = async () => {
-    if (!user || !selectedEmployee || !selectedDay || !selectedSchool || !inputClass.trim() || !inputBooks) {
-      return alert("⚠️ Vui lòng nhập đầy đủ thông tin!");
-    }
-    
-    const day = parseInt(selectedDay);
-    const books = parseInt(inputBooks) || 0;
+    if (!user || !selectedEmployee || !selectedDay || !selectedSchool || !inputClass.trim() || !inputBooks) return alert("⚠️ Nhập đủ!");
+    const day = parseInt(selectedDay, 10);
+    if (day < 1 || day > daysInMonth) return alert(`⚠️ Ngày phải từ 1..${daysInMonth}`);
+    const books = parseInt(inputBooks, 10) || 0;
     const classname = inputClass.trim();
-    
-    // Kiểm tra xem đã có entry của nhân viên này cho trường/lớp/ngày này chưa
-    const existingEntry = entries.find(
-      (e) => 
-        e.employee === selectedEmployee &&
-        e.day === day &&
-        e.school === selectedSchool &&
-        e.class === classname
-    );
-    
-    if (existingEntry) {
-      // Nếu đã có, hỏi có muốn sửa không
-      const confirm = window.confirm(
-        `Đã có ${existingEntry.books} sổ của nhân viên "${selectedEmployee}" cho trường "${selectedSchool}", lớp "${classname}", ngày ${day}.\n\nBạn muốn SỬA thành ${books} sổ?\n\n(Cancel = Giữ nguyên, OK = Sửa)`
-      );
-      
-      if (confirm) {
-        // Sửa entry hiện có
-        const ref = doc(db, `users/${user.uid}/months/${month}/entries`, existingEntry.id);
-        await updateDoc(ref, {
-          books: books,
-          note: inputNote.trim() || existingEntry.note,
-          timestamp: Date.now(), // Cập nhật timestamp
-        });
-        // Reset form
-        setInputClass("");
-        setInputBooks("");
-        setInputNote("");
-        return;
-      } else {
-        // Không sửa, giữ nguyên
-        setInputClass("");
-        setInputBooks("");
-        setInputNote("");
-        return;
+    const dup = entries.find((e) => e.employee === selectedEmployee && e.day === day && e.school === selectedSchool && e.class === classname);
+    if (dup) {
+      if (window.confirm(`Đã có ${dup.books} sổ. Sửa thành ${books}?`)) {
+        await updateDoc(doc(db, `users/${user.uid}/months/${month}/entries`, dup.id), { books, note: inputNote.trim() || dup.note, timestamp: Date.now() });
       }
+      setInputClass(""); setInputBooks(""); setInputNote("");
+      return;
     }
-    
-    // Nếu chưa có, tạo mới
     const id = `entry_${Date.now()}`;
-    const ref = doc(db, `users/${user.uid}/months/${month}/entries`, id);
-    await setDoc(ref, {
-      employee: selectedEmployee,
-      day: day,
-      school: selectedSchool,
-      class: classname,
-      books: books,
-      note: inputNote.trim() || "",
-      timestamp: Date.now(),
+    await setDoc(doc(db, `users/${user.uid}/months/${month}/entries`, id), {
+      employee: selectedEmployee, day, school: selectedSchool, class: classname, books, note: inputNote.trim() || "", timestamp: Date.now(),
     });
-    // Reset form
-    setInputClass("");
-    setInputBooks("");
-    setInputNote("");
+    setInputClass(""); setInputBooks(""); setInputNote("");
   };
-
   const deleteEntry = async (id) => {
-    if (window.confirm("🗑️ Xóa đợt nhập này?")) {
-      await deleteDoc(doc(db, `users/${user.uid}/months/${month}/entries`, id));
-    }
+    if (window.confirm("🗑️ Xóa đợt nhập này?")) await deleteDoc(doc(db, `users/${user.uid}/months/${month}/entries`, id));
   };
-
-  const toggleSelectEntry = (id) => {
-    const newSelected = new Set(selectedEntries);
-    if (newSelected.has(id)) {
-      newSelected.delete(id);
-    } else {
-      newSelected.add(id);
-    }
-    setSelectedEntries(newSelected);
-  };
-
-  const selectAllEntries = () => {
-    if (selectedEntries.size === entries.length) {
-      setSelectedEntries(new Set());
-    } else {
-      setSelectedEntries(new Set(entries.map((e) => e.id)));
-    }
-  };
-
-  const deleteSelectedEntries = async () => {
-    if (selectedEntries.size === 0) {
-      alert("⚠️ Vui lòng chọn entry để xóa!");
-      return;
-    }
-    
-    const confirmMsg = selectedEntries.size === 1
-      ? "🗑️ Xóa 1 đợt nhập này?"
-      : `🗑️ Xóa ${selectedEntries.size} đợt nhập đã chọn?`;
-    
-    if (window.confirm(confirmMsg)) {
-      const promises = Array.from(selectedEntries).map((id) =>
-        deleteDoc(doc(db, `users/${user.uid}/months/${month}/entries`, id))
-      );
-      await Promise.all(promises);
-      setSelectedEntries(new Set());
-    }
-  };
-
   const editEntry = async (entry) => {
-    const newBooks = prompt(
-      `✏️ Sửa số sổ\n\nNhân viên: ${entry.employee}\nTrường: ${entry.school}\nLớp: ${entry.class}\nNgày: ${entry.day}\n\nSố sổ hiện tại: ${entry.books}\nNhập số sổ mới:`,
-      entry.books
-    );
+    const newBooks = prompt(`✏️ Sửa số sổ\n${entry.employee} - ${entry.school}/${entry.class} - Ngày ${entry.day}\nHiện tại: ${entry.books}\nSố mới:`, entry.books);
     if (newBooks === null || newBooks === "") return;
-    
-    const booksNum = parseInt(newBooks);
-    if (isNaN(booksNum) || booksNum < 0) {
-      alert("⚠️ Vui lòng nhập số hợp lệ!");
-      return;
-    }
-
-    const newNote = prompt(
-      `Ghi chú hiện tại: ${entry.note || "(không có)"}\n\nNhập ghi chú mới (để trống = giữ nguyên):`,
-      entry.note || ""
-    );
-    
-    const ref = doc(db, `users/${user.uid}/months/${month}/entries`, entry.id);
-    await updateDoc(ref, {
-      books: booksNum,
-      note: newNote !== null ? newNote.trim() : entry.note,
-      timestamp: Date.now(),
+    const n = parseInt(newBooks, 10);
+    if (Number.isNaN(n) || n < 0) return alert("⚠️ Số hợp lệ!");
+    const newNote = prompt(`Ghi chú hiện tại: ${entry.note || "(không)"}\nGhi chú mới (trống = giữ):`, entry.note || "");
+    await updateDoc(doc(db, `users/${user.uid}/months/${month}/entries`, entry.id), {
+      books: n, note: newNote !== null ? newNote.trim() : entry.note, timestamp: Date.now(),
     });
   };
-
-  // ==== MODAL FUNCTIONS ====
-  const openDetailModal = (day, school) => {
-    setDetailModal({ day, school });
+  const toggleSelectEntry = (id) => {
+    const s = new Set(selectedEntries);
+    s.has(id) ? s.delete(id) : s.add(id);
+    setSelectedEntries(s);
+  };
+  const selectAllEntries = () => {
+    if (selectedEntries.size === entries.length) setSelectedEntries(new Set());
+    else setSelectedEntries(new Set(entries.map((e) => e.id)));
+  };
+  const deleteSelectedEntries = async () => {
+    if (!selectedEntries.size) return alert("⚠️ Chọn entry để xóa!");
+    if (!window.confirm(`🗑️ Xóa ${selectedEntries.size} đợt đã chọn?`)) return;
+    await Promise.all(Array.from(selectedEntries).map((id) => deleteDoc(doc(db, `users/${user.uid}/months/${month}/entries`, id))));
+    setSelectedEntries(new Set());
   };
 
-  const closeDetailModal = () => {
-    setDetailModal(null);
-  };
-
-  // Get detail data for modal
+  // Modal
+  const openDetailModal = (day, school) => setDetailModal({ day, school });
+  const closeDetailModal = () => setDetailModal(null);
   const modalDetailData = useMemo(() => {
     if (!detailModal) return null;
-    
     const { day, school } = detailModal;
-    const dayEntries = entries.filter(
-      (e) => e.day === day && e.school === school
-    );
-    
-    // Group by employee and class
+    const dayEntries = entries.filter((e) => e.day === day && e.school === school);
     const grouped = {};
     dayEntries.forEach((entry) => {
-      const key = `${entry.employee}_${entry.class}`;
-      if (!grouped[key]) {
-        grouped[key] = {
-          employee: entry.employee,
-          class: entry.class,
-          books: 0,
-          notes: [],
-        };
-      }
-      grouped[key].books += entry.books || 0;
-      if (entry.note) {
-        grouped[key].notes.push(entry.note);
-      }
+      const k = `${entry.employee}_${entry.class}`;
+      if (!grouped[k]) grouped[k] = { employee: entry.employee, class: entry.class, books: 0, notes: [] };
+      grouped[k].books += entry.books || 0;
+      if (entry.note) grouped[k].notes.push(entry.note);
     });
-    
-    const detailList = Object.values(grouped).sort((a, b) => {
-      if (a.employee !== b.employee) return a.employee.localeCompare(b.employee);
-      return a.class.localeCompare(b.class);
-    });
-    
-    const totalBooks = detailList.reduce((sum, item) => sum + item.books, 0);
-    
-    return {
-      day,
-      school,
-      details: detailList,
-      totalBooks,
-    };
+    const list = Object.values(grouped).sort((a, b) => (a.employee === b.employee ? a.class.localeCompare(b.class) : a.employee.localeCompare(b.employee)));
+    const total = list.reduce((s, i) => s + i.books, 0);
+    return { day, school, details: list, totalBooks: total };
   }, [detailModal, entries]);
 
-  // ==== EXPORT EXCEL ====
-  const exportExcel = () => {
-    const wb = XLSX.utils.book_new();
-    
-    // Helper function to create styled worksheet
-    const createStyledSheet = (header, rows, totalRow, sheetTitle, isEmployeeSheet = false) => {
-      // Create title and info rows
-      const titleRow = ["BÁO CÁO SỔ Y TẾ KHÁM TRẺ EM"];
-      const infoRow1 = [`Tháng: ${month}`];
-      const infoRow2 = isEmployeeSheet ? [`Nhân viên: ${sheetTitle}`] : ["Tổng hợp tất cả nhân viên"];
-      const infoRow3 = [`Giá/sổ: ${pricePerBook.toLocaleString('vi-VN')} nghìn VND`];
-      const emptyRow = [""];
-      
-      // Calculate summary info
-      const totalBooks = totalRow[totalRow.length - 2] || 0;
-      const totalMoney = totalRow[totalRow.length - 1] || 0;
-      const summaryRow = [`Tổng số sổ: ${totalBooks} sổ | Tổng tiền: ${formatVND(totalMoney)}`];
-      
-      // Combine all rows
-      const allRows = [
-        titleRow,
-        infoRow1,
-        infoRow2,
-        infoRow3,
-        emptyRow,
-        summaryRow,
-        emptyRow,
-        header,
-        ...rows,
-        totalRow
-      ];
-      
-      const ws = XLSX.utils.aoa_to_sheet(allRows);
-      
-      // Calculate range (skip title rows)
-      const headerRowIndex = 7; // Header is at row 8 (0-indexed = 7)
-      const dataStartRow = 8;
-      const totalRowIndex = dataStartRow + rows.length;
-      
-      const range = XLSX.utils.decode_range(ws['!ref']);
-      
-      // Style title row (row 0)
-      const titleCell = XLSX.utils.encode_cell({ r: 0, c: 0 });
-      if (ws[titleCell]) {
-        ws[titleCell].s = {
-          fill: { fgColor: { rgb: "007bff" } },
-          font: { bold: true, color: { rgb: "FFFFFF" }, sz: 16 },
-          alignment: { horizontal: "center", vertical: "center" },
-        };
-      }
-      
-      // Merge title cells
-      if (!ws['!merges']) ws['!merges'] = [];
-      ws['!merges'].push({ s: { r: 0, c: 0 }, e: { r: 0, c: range.e.c } });
-      
-      // Style info rows (rows 1-3, 5)
-      for (let row = 1; row <= 3; row++) {
-        const cellAddress = XLSX.utils.encode_cell({ r: row, c: 0 });
-        if (ws[cellAddress]) {
-          ws[cellAddress].s = {
-            font: { bold: true, sz: 11 },
-            alignment: { horizontal: "left", vertical: "center" },
-          };
-        }
-        // Merge info cells
-        ws['!merges'].push({ s: { r: row, c: 0 }, e: { r: row, c: range.e.c } });
-      }
-      
-      // Style summary row (row 5)
-      const summaryCell = XLSX.utils.encode_cell({ r: 5, c: 0 });
-      if (ws[summaryCell]) {
-        ws[summaryCell].s = {
-          fill: { fgColor: { rgb: "E7F3FF" } },
-          font: { bold: true, sz: 12, color: { rgb: "007bff" } },
-          alignment: { horizontal: "center", vertical: "center" },
-        };
-        ws['!merges'].push({ s: { r: 5, c: 0 }, e: { r: 5, c: range.e.c } });
-      }
-      
-      // Style header row (row 7)
-      for (let col = range.s.c; col <= range.e.c; col++) {
-        const cellAddress = XLSX.utils.encode_cell({ r: headerRowIndex, c: col });
-        if (!ws[cellAddress]) continue;
-        
-        ws[cellAddress].s = {
-          fill: { fgColor: { rgb: "4472C4" } }, // Blue background
-          font: { bold: true, color: { rgb: "FFFFFF" }, sz: 11 }, // White bold text
-          alignment: { horizontal: "center", vertical: "center" },
-          border: {
-            top: { style: "thin", color: { rgb: "000000" } },
-            bottom: { style: "thin", color: { rgb: "000000" } },
-            left: { style: "thin", color: { rgb: "000000" } },
-            right: { style: "thin", color: { rgb: "000000" } },
-          },
-        };
-      }
-      
-      // Style data rows
-      for (let row = 0; row < rows.length; row++) {
-        const actualRowIndex = dataStartRow + row;
-        for (let col = range.s.c; col <= range.e.c; col++) {
-          const cellAddress = XLSX.utils.encode_cell({ r: actualRowIndex, c: col });
-          if (!ws[cellAddress]) continue;
-          
-          const isEvenRow = row % 2 === 0;
-          ws[cellAddress].s = {
-            fill: { fgColor: { rgb: isEvenRow ? "F2F2F2" : "FFFFFF" } }, // Alternate row colors
-            font: { sz: 10 },
-            alignment: { 
-              horizontal: col < 2 ? "left" : "center", 
-              vertical: "center" 
-            },
-            border: {
-              top: { style: "thin", color: { rgb: "CCCCCC" } },
-              bottom: { style: "thin", color: { rgb: "CCCCCC" } },
-              left: { style: "thin", color: { rgb: "CCCCCC" } },
-              right: { style: "thin", color: { rgb: "CCCCCC" } },
-            },
-          };
-          
-          // Bold for school column
-          if (col === 0) {
-            ws[cellAddress].s.font.bold = true;
-          }
-          
-          // Format money column
-          if (col === range.e.c) {
-            ws[cellAddress].s.numFmt = '#,##0 "₫"';
-            ws[cellAddress].s.font.color = { rgb: "006100" }; // Green for money
-          }
-        }
-      }
-      
-      // Style total row
-      for (let col = range.s.c; col <= range.e.c; col++) {
-        const cellAddress = XLSX.utils.encode_cell({ r: totalRowIndex, c: col });
-        if (!ws[cellAddress]) continue;
-        
-        ws[cellAddress].s = {
-          fill: { fgColor: { rgb: "FFF2CC" } }, // Yellow background
-          font: { bold: true, sz: 11, color: { rgb: "000000" } },
-          alignment: { horizontal: "center", vertical: "center" },
-          border: {
-            top: { style: "medium", color: { rgb: "000000" } },
-            bottom: { style: "thin", color: { rgb: "000000" } },
-            left: { style: "thin", color: { rgb: "000000" } },
-            right: { style: "thin", color: { rgb: "000000" } },
-          },
-        };
-        
-        // Format money column in total row
-        if (col === range.e.c) {
-          ws[cellAddress].s.numFmt = '#,##0 "₫"';
-          ws[cellAddress].s.font.color = { rgb: "C65911" }; // Dark orange for total money
-        }
-      }
-      
-      // Freeze header row
-      ws['!freeze'] = { xSplit: 0, ySplit: headerRowIndex + 1, topLeftCell: "A8", activePane: "bottomLeft" };
-      
-      // Set column widths
-      ws['!cols'] = [
-        { wch: 18 }, // Trường
-        { wch: 12 }, // Lớp
-        ...Array(31).fill({ wch: 7 }), // Các ngày
-        { wch: 12 }, // Tổng Sổ
-        { wch: 18 }, // Tiền
-      ];
-      
-      // Set row heights
-      ws['!rows'] = [
-        { hpt: 25 }, // Title row
-        { hpt: 18 }, // Info rows
-        { hpt: 18 },
-        { hpt: 18 },
-        { hpt: 12 }, // Empty row
-        { hpt: 20 }, // Summary row
-        { hpt: 12 }, // Empty row
-        { hpt: 22 }, // Header row
-        ...Array(rows.length).fill({ hpt: 16 }), // Data rows
-        { hpt: 20 }, // Total row
-      ];
-      
-      return ws;
-    };
-    
-    // Export each employee's table as a separate sheet
-    Object.keys(employeeSummaryTables).forEach((empName) => {
-      const empTable = employeeSummaryTables[empName];
-      const header = ["Trường", "Lớp", ...Array.from({ length: 31 }, (_, i) => `Ngày ${i + 1}`), "Tổng Sổ", "Tiền (VND)"];
-      const rows = empTable.map((row) => {
-        const sum = row.days.reduce((a, b) => a + b, 0);
-        const money = Math.round(sum * pricePerBook * 1000);
-        return [row.school, row.class, ...row.days, sum, money];
-      });
-      
-      const empTotal = empTable.reduce((sum, row) => {
-        return sum + row.days.reduce((a, b) => a + b, 0);
-      }, 0);
-      const empMoney = Math.round(empTotal * pricePerBook * 1000);
-      const totalRow = ["", "TỔNG", ...Array(31).fill(""), empTotal, empMoney];
-      
-      const ws = createStyledSheet(header, rows, totalRow, empName, true);
-      XLSX.utils.book_append_sheet(wb, ws, empName);
-    });
-    
-    // Also add a summary sheet with all data combined
-    const header = ["Trường", "Lớp", ...Array.from({ length: 31 }, (_, i) => `Ngày ${i + 1}`), "Tổng Sổ", "Tiền (VND)"];
-    const rows = summaryTable.map((row) => {
-      const sum = row.days.reduce((a, b) => a + b, 0);
-      const money = Math.round(sum * pricePerBook * 1000);
-      return [row.school, row.class, ...row.days, sum, money];
-    });
-    const totalRow = ["", "TỔNG", ...Array(31).fill(""), totalBooks, totalMoney];
-    const ws = createStyledSheet(header, rows, totalRow, "Tổng chung", false);
-    
-    XLSX.utils.book_append_sheet(wb, ws, "Tổng chung");
-    
-    const filename = `so_y_te_${month}.xlsx`;
-    XLSX.writeFile(wb, filename);
-    
-    alert(`✅ Đã xuất Excel thành công!\n\n- ${Object.keys(employeeSummaryTables).length} sheet theo nhân viên\n- 1 sheet tổng chung\n\nFile: ${filename}`);
-  };
-
   const formatVND = (v) => v.toLocaleString("vi-VN") + " ₫";
+
+  // ===== EXPORT EXCEL (giá động qua sheet Cấu hình) =====
+  const exportExcel = async () => {
+    try {
+      const wb = new ExcelJS.Workbook();
+      wb.creator = "SalaryApp"; wb.created = new Date();
+
+      const usedSheetNames = new Set();
+      const employeeSheetMeta = []; // [{displayName, sheetName, school, sum, money, startDataRow, endDataRow}]
+      let summaryMeta = null;
+
+      const addHeaderFooterAndLogo = (ws, title) => {
+        ws.headerFooter = {
+          differentFirst: false,
+          oddHeader: `&L Mã BC: ${REPORT_CODE} &C ${title} &R Tháng ${month}`,
+          oddFooter: `&L ${user?.email || ""} &C Trang &P/&N &R In: &D &T`,
+        };
+        const base64 = window.APP_LOGO_BASE64 || null; // why: logo tùy chọn
+        if (base64) {
+          const ext = base64.includes("image/jpeg") ? "jpeg" : "png";
+          const imgId = wb.addImage({ base64, extension: ext });
+          ws.addImage(imgId, { tl: { col: 0.15, row: 0.15 }, ext: { width: 140, height: 40 } });
+        }
+      };
+
+      // --- Sheet Cấu hình (trung tâm giá/sổ) ---
+      const configSheetName = sanitizeSheetName("Cấu hình", usedSheetNames);
+      const cfg = wb.addWorksheet(configSheetName, { views: [{ state: "frozen", ySplit: 2 }] });
+      addHeaderFooterAndLogo(cfg, "CẤU HÌNH BÁO CÁO");
+
+      cfg.columns = [{ width: 28 }, { width: 20 }, { width: 40 }];
+      const c1 = cfg.addRow(["CẤU HÌNH BÁO CÁO"]);
+      c1.font = { bold: true, size: 16, color: { argb: "FFFFFFFF" } };
+      c1.alignment = { vertical: "middle", horizontal: "center" };
+      c1.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF0B7AD1" } };
+      cfg.mergeCells(1, 1, 1, 3);
+
+      const r2 = cfg.addRow(["Giá/sổ (nghìn VND):", pricePerBook, "👉 Sửa ô B2 để đổi giá cho toàn bộ workbook"]);
+      cfg.getCell("B2").numFmt = "0.0";
+      r2.eachCell((cell, i) => {
+        cell.border = { top: { style: "thin" }, left: { style: "thin" }, bottom: { style: "thin" }, right: { style: "thin" } };
+        if (i === 3) cell.font = { italic: true, color: { argb: "FF666666" } };
+      });
+
+      cfg.addRow(["Tháng báo cáo:", month]);
+      cfg.pageSetup = { orientation: "portrait", fitToPage: true, fitToWidth: 1, fitToHeight: 0 };
+
+      const CONFIG_PRICE_REF = `'${configSheetName}'!$B$2`; // why: 1 nơi điều khiển giá
+
+      const buildDataSheet = ({ sheetName, title, subtitle, rowsData }) => {
+        const ws = wb.addWorksheet(sheetName, { views: [{ state: "frozen", ySplit: 8 }] });
+        addHeaderFooterAndLogo(ws, title);
+
+        ws.columns = [
+          { header: "Trường", width: 20 },
+          { header: "Lớp", width: 12 },
+          ...Array(daysInMonth).fill(0).map(() => ({ width: 6 })),
+          { header: "Tổng Sổ", width: 10 },
+          { header: "Tiền (VND)", width: 16 },
+        ];
+        const COL_SCHOOL = 1;
+        const COL_CLASS = 2;
+        const COL_DAY_START = 3;
+        const COL_DAY_END = COL_DAY_START + daysInMonth - 1;
+        const COL_SUM = COL_DAY_END + 1;
+        const COL_MONEY = COL_SUM + 1;
+        const totalCols = COL_MONEY;
+        const colLetter = (idx) => ws.getColumn(idx).letter;
+
+        // Title + info (B3 liên kết giá)
+        const r1 = ws.addRow([title]);
+        const r2 = ws.addRow([subtitle]);
+        const r3 = ws.addRow(["Giá/sổ (nghìn VND):", { formula: CONFIG_PRICE_REF }]); // hiển thị giá từ Cấu hình
+        ws.addRow([""]);
+        const r5 = ws.addRow(["Sửa giá tại sheet 'Cấu hình' (ô B2) → Tiền tự cập nhật."]);
+        ws.addRow([""]);
+
+        const header = ["Trường", "Lớp", ...Array.from({ length: daysInMonth }, (_, i) => `Ngày ${i + 1}`), "Tổng Sổ", "Tiền (VND)"];
+        const headerRow = ws.addRow(header);
+
+        const mergeRow = (ri) => ws.mergeCells(ri, 1, ri, totalCols);
+        [1, 2, 5].forEach(mergeRow); // row3 không merge vì có B3 là giá động
+
+        const center = { vertical: "middle", horizontal: "center" };
+        const left = { vertical: "middle", horizontal: "left" };
+        r1.height = 26; ws.getRow(8).height = 22;
+        r1.font = { bold: true, size: 16, color: { argb: "FFFFFFFF" } };
+        r1.alignment = center;
+        r1.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF007BFF" } };
+        r2.font = { bold: true, size: 11 }; r2.alignment = left;
+        r3.font = { bold: true, size: 11 };
+        r5.font = { bold: true, size: 12, color: { argb: "FF007BFF" } };
+        r5.alignment = center;
+        r5.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFE7F3FF" } };
+
+        headerRow.eachCell((cell) => {
+          cell.font = { bold: true, color: { argb: "FFFFFFFF" } };
+          cell.alignment = center;
+          cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF4472C4" } };
+          cell.border = { top: { style: "thin" }, left: { style: "thin" }, bottom: { style: "thin" }, right: { style: "thin" } };
+        });
+
+        const startDataRow = 9;
+        let dataRowCount = 0;
+
+        rowsData.forEach(({ school, className, days }) => {
+          const dayVals = (days || []).slice(0, daysInMonth).map((v) => (v || 0));
+          while (dayVals.length < daysInMonth) dayVals.push(0);
+          const row = ws.addRow([school, className, ...dayVals, null, null]);
+          dataRowCount += 1;
+          const r = row.number;
+
+          const sumFormula = `SUM(${colLetter(COL_DAY_START)}${r}:${colLetter(COL_DAY_END)}${r})`;
+          row.getCell(COL_SUM).value = { formula: sumFormula };
+          // why: Tiền phụ thuộc 'Cấu hình'!$B$2 nên đổi 1 nơi là đủ
+          const moneyFormula = `ROUND(${colLetter(COL_SUM)}${r}*${CONFIG_PRICE_REF}*1000,0)`;
+          row.getCell(COL_MONEY).value = { formula: moneyFormula };
+          row.getCell(COL_MONEY).numFmt = '#,##0" ₫"';
+
+          row.eachCell((cell, col) => {
+            cell.alignment = col <= COL_CLASS ? left : center;
+            cell.border = { top: { style: "thin", color: { argb: "FFCCCCCC" } }, left: { style: "thin", color: { argb: "FFCCCCCC" } }, bottom: { style: "thin", color: { argb: "FFCCCCCC" } }, right: { style: "thin", color: { argb: "FFCCCCCC" } } };
+            if ((r - startDataRow) % 2 === 0) cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFF2F2F2" } };
+          });
+          row.getCell(COL_SCHOOL).font = { bold: true };
+        });
+
+        const totalRow = ws.addRow(["", "TỔNG", ...Array(daysInMonth).fill(null), null, null]);
+        const endDataRow = startDataRow + dataRowCount - 1;
+        if (dataRowCount > 0) {
+          for (let c = COL_DAY_START; c <= COL_DAY_END; c++) {
+            const L = colLetter(c);
+            totalRow.getCell(c).value = { formula: `SUM(${L}${startDataRow}:${L}${endDataRow})` };
+          }
+          totalRow.getCell(COL_SUM).value = { formula: `SUM(${colLetter(COL_SUM)}${startDataRow}:${colLetter(COL_SUM)}${endDataRow})` };
+          totalRow.getCell(COL_MONEY).value = { formula: `SUM(${colLetter(COL_MONEY)}${startDataRow}:${colLetter(COL_MONEY)}${endDataRow})` };
+        } else {
+          for (let c = COL_DAY_START; c <= COL_DAY_END; c++) totalRow.getCell(c).value = 0;
+          totalRow.getCell(COL_SUM).value = 0;
+          totalRow.getCell(COL_MONEY).value = 0;
+        }
+        totalRow.getCell(COL_MONEY).numFmt = '#,##0" ₫"';
+        totalRow.eachCell((cell) => {
+          cell.font = { bold: true };
+          cell.alignment = { vertical: "middle", horizontal: "center" };
+          cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFFFF2CC" } };
+          cell.border = { top: { style: "medium" }, left: { style: "thin" }, bottom: { style: "thin" }, right: { style: "thin" } };
+        });
+
+        ws.autoFilter = { from: { row: 8, column: 1 }, to: { row: 8, column: totalCols } };
+        ws.pageSetup = { orientation: "landscape", fitToPage: true, fitToWidth: 1, fitToHeight: 0 };
+
+        return {
+          startDataRow,
+          endDataRow,
+          col: {
+            school: ws.getColumn(1).letter,
+            sum: ws.getColumn(COL_SUM).letter,
+            money: ws.getColumn(COL_MONEY).letter,
+          },
+        };
+      };
+
+      const toRowsData = (table) =>
+        table.map((row) => ({ school: row.school, className: row.class, days: row.days }));
+
+      // === SHEETS NHÂN VIÊN ===
+      const sheetNameByEmployee = {};
+      Object.keys(employeeSummaryTables).forEach((empName) => {
+        const sheetName = sanitizeSheetName(empName, usedSheetNames);
+        sheetNameByEmployee[empName] = sheetName;
+        const meta = buildDataSheet({
+          sheetName,
+          title: "BÁO CÁO SỔ Y TẾ KHÁM TRẺ EM",
+          subtitle: `Tháng: ${month}   |   Nhân viên: ${empName}`,
+          rowsData: toRowsData(employeeSummaryTables[empName] || []),
+        });
+        employeeSheetMeta.push({
+          displayName: empName,
+          sheetName,
+          ...meta.col,
+          startDataRow: meta.startDataRow,
+          endDataRow: meta.endDataRow,
+        });
+      });
+
+      // === SHEET TỔNG CHUNG ===
+      const summarySheetName = sanitizeSheetName("Tổng chung", usedSheetNames);
+      const sumMeta = buildDataSheet({
+        sheetName: summarySheetName,
+        title: "BÁO CÁO SỔ Y TẾ KHÁM TRẺ EM",
+        subtitle: `Tháng: ${month}   |   Tổng hợp tất cả nhân viên`,
+        rowsData: toRowsData(summaryTable),
+      });
+      summaryMeta = {
+        sheetName: summarySheetName,
+        ...sumMeta.col,
+        startDataRow: sumMeta.startDataRow,
+        endDataRow: sumMeta.endDataRow,
+      };
+
+      // === SHEET PIVOT NHANH ===
+      const pivotSheetName = sanitizeSheetName("Pivot nhanh", usedSheetNames);
+      const pv = wb.addWorksheet(pivotSheetName, { views: [{ state: "frozen", ySplit: 6 }] });
+      addHeaderFooterAndLogo(pv, "PIVOT NHANH");
+
+      const H1 = pv.addRow(["PIVOT NHANH - TỔNG TIỀN THEO TRƯỜNG / NHÂN VIÊN"]);
+      H1.font = { bold: true, size: 16, color: { argb: "FFFFFFFF" } };
+      H1.alignment = { vertical: "middle", horizontal: "center" };
+      H1.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF0B7AD1" } };
+      pv.mergeCells(1, 1, 1, 12);
+
+      pv.addRow([`Tháng: ${month}`]).font = { bold: true };
+      pv.addRow([`Giá/sổ (nghìn VND):`, { formula: CONFIG_PRICE_REF }]).font = { bold: true };
+      pv.addRow([""]);
+
+      const addTableHeader = (rowIdx, titles) => {
+        const r = pv.getRow(rowIdx);
+        titles.forEach((t, i) => {
+          const c = r.getCell(i + 1);
+          c.value = t;
+          c.font = { bold: true, color: { argb: "FFFFFFFF" } };
+          c.alignment = { vertical: "middle", horizontal: "center" };
+          c.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF2F5597" } };
+          c.border = { top: { style: "thin" }, left: { style: "thin" }, bottom: { style: "thin" }, right: { style: "thin" } };
+        });
+        r.height = 20;
+      };
+      const moneyFmt = '#,##0" ₫"';
+
+      // Block 1: Tổng theo Trường
+      pv.addRow(["Tổng theo Trường"]).font = { bold: true, size: 13 };
+      const b1Header = pv.actualRowCount + 1;
+      addTableHeader(b1Header, ["Trường", "Tổng Sổ", "Tiền (VND)"]);
+      const b1Start = b1Header + 1;
+      schools.forEach((schoolName, idx) => {
+        const r = pv.getRow(b1Start + idx);
+        r.getCell(1).value = schoolName;
+        r.getCell(2).value = {
+          formula: `SUMIF('${summaryMeta.sheetName}'!${summaryMeta.school}$${summaryMeta.startDataRow}:${summaryMeta.school}$${summaryMeta.endDataRow}, A${b1Start + idx}, '${summaryMeta.sheetName}'!${summaryMeta.sum}$${summaryMeta.startDataRow}:${summaryMeta.sum}$${summaryMeta.endDataRow})`,
+        };
+        r.getCell(3).value = {
+          formula: `SUMIF('${summaryMeta.sheetName}'!${summaryMeta.school}$${summaryMeta.startDataRow}:${summaryMeta.school}$${summaryMeta.endDataRow}, A${b1Start + idx}, '${summaryMeta.sheetName}'!${summaryMeta.money}$${summaryMeta.startDataRow}:${summaryMeta.money}$${summaryMeta.endDataRow})`,
+        };
+        r.getCell(3).numFmt = moneyFmt;
+        for (let c = 1; c <= 3; c++) {
+          r.getCell(c).border = { top: { style: "thin" }, left: { style: "thin" }, bottom: { style: "thin" }, right: { style: "thin" } };
+          r.getCell(c).alignment = c === 1 ? { vertical: "middle", horizontal: "left" } : { vertical: "middle", horizontal: "center" };
+        }
+      });
+      const b1End = b1Start + Math.max(schools.length - 1, 0);
+      const b1Total = pv.getRow(b1End + 1);
+      b1Total.getCell(1).value = "TỔNG"; b1Total.getCell(1).font = { bold: true };
+      b1Total.getCell(2).value = { formula: `SUM(B${b1Start}:B${b1End})` };
+      b1Total.getCell(3).value = { formula: `SUM(C${b1Start}:C${b1End})` };
+      b1Total.getCell(3).numFmt = moneyFmt;
+      for (let c = 1; c <= 3; c++) b1Total.getCell(c).border = { top: { style: "medium" }, left: { style: "thin" }, bottom: { style: "thin" }, right: { style: "thin" } };
+      pv.addRow([""]);
+
+      // Block 2: Tổng theo Nhân viên
+      pv.addRow(["Tổng theo Nhân viên"]).font = { bold: true, size: 13 };
+      const b2Header = pv.actualRowCount + 1;
+      addTableHeader(b2Header, ["Nhân viên", "Tổng Sổ", "Tiền (VND)"]);
+      const b2Start = b2Header + 1;
+      employeeSheetMeta.forEach((meta, i) => {
+        const r = pv.getRow(b2Start + i);
+        r.getCell(1).value = meta.displayName;
+        r.getCell(2).value = { formula: `SUM('${meta.sheetName}'!${meta.sum}$${meta.startDataRow}:${meta.sum}$${meta.endDataRow})` };
+        r.getCell(3).value = { formula: `SUM('${meta.sheetName}'!${meta.money}$${meta.startDataRow}:${meta.money}$${meta.endDataRow})` };
+        r.getCell(3).numFmt = moneyFmt;
+        for (let c = 1; c <= 3; c++) {
+          r.getCell(c).border = { top: { style: "thin" }, left: { style: "thin" }, bottom: { style: "thin" }, right: { style: "thin" } };
+          r.getCell(c).alignment = c === 1 ? { vertical: "middle", horizontal: "left" } : { vertical: "middle", horizontal: "center" };
+        }
+      });
+      const b2End = b2Start + Math.max(employeeSheetMeta.length - 1, 0);
+      const b2Total = pv.getRow(b2End + 1);
+      b2Total.getCell(1).value = "TỔNG"; b2Total.getCell(1).font = { bold: true };
+      b2Total.getCell(2).value = { formula: `SUM(B${b2Start}:B${b2End})` };
+      b2Total.getCell(3).value = { formula: `SUM(C${b2Start}:C${b2End})` };
+      b2Total.getCell(3).numFmt = moneyFmt;
+      for (let c = 1; c <= 3; c++) b2Total.getCell(c).border = { top: { style: "medium" }, left: { style: "thin" }, bottom: { style: "thin" }, right: { style: "thin" } };
+      pv.addRow([""]);
+
+      // Block 3: Bảng chéo Trường × Nhân viên (Tiền)
+      pv.addRow(["Bảng chéo: Trường × Nhân viên (Tiền)"]).font = { bold: true, size: 13 };
+      const mHeader = pv.actualRowCount + 1;
+      const matrixHeaders = ["Trường", ...employeeSheetMeta.map((m) => m.displayName), "Tổng theo Trường"];
+      addTableHeader(mHeader, matrixHeaders);
+      const mStart = mHeader + 1;
+
+      schools.forEach((schoolName, idx) => {
+        const rIdx = mStart + idx;
+        const r = pv.getRow(rIdx);
+        r.getCell(1).value = schoolName;
+        employeeSheetMeta.forEach((meta, j) => {
+          const cell = r.getCell(2 + j);
+          cell.value = {
+            formula: `SUMIF('${meta.sheetName}'!A$${meta.startDataRow}:A$${meta.endDataRow}, $A${rIdx}, '${meta.sheetName}'!${meta.money}$${meta.startDataRow}:${meta.money}$${meta.endDataRow})`,
+          };
+          cell.numFmt = moneyFmt;
+          cell.alignment = { vertical: "middle", horizontal: "center" };
+          cell.border = { top: { style: "thin" }, left: { style: "thin" }, bottom: { style: "thin" }, right: { style: "thin" } };
+        });
+        const totalCell = r.getCell(2 + employeeSheetMeta.length);
+        const fromL = pv.getColumn(2).letter;
+        const toL = pv.getColumn(1 + employeeSheetMeta.length).letter;
+        totalCell.value = { formula: `SUM(${fromL}${rIdx}:${toL}${rIdx})` };
+        totalCell.numFmt = moneyFmt;
+        totalCell.font = { bold: true };
+        for (let c = 1; c <= 2 + employeeSheetMeta.length; c++) {
+          const cell = r.getCell(c);
+          if (c === 1) cell.alignment = { vertical: "middle", horizontal: "left" };
+          cell.border = { top: { style: "thin" }, left: { style: "thin" }, bottom: { style: "thin" }, right: { style: "thin" } };
+        }
+      });
+      const mEnd = mStart + Math.max(schools.length - 1, 0);
+      const rTotal = pv.getRow(mEnd + 1);
+      rTotal.getCell(1).value = "TỔNG"; rTotal.getCell(1).font = { bold: true };
+      employeeSheetMeta.forEach((meta, j) => {
+        const cIdx = 2 + j;
+        const cL = pv.getColumn(cIdx).letter;
+        rTotal.getCell(cIdx).value = { formula: `SUM(${cL}${mStart}:${cL}${mEnd})` };
+        rTotal.getCell(cIdx).numFmt = moneyFmt;
+      });
+      const totalColIdx = 2 + employeeSheetMeta.length;
+      const totalL = pv.getColumn(totalColIdx).letter;
+      rTotal.getCell(totalColIdx).value = { formula: `SUM(${totalL}${mStart}:${totalL}${mEnd})` };
+      rTotal.getCell(totalColIdx).numFmt = moneyFmt;
+      for (let c = 1; c <= totalColIdx; c++) {
+        rTotal.getCell(c).border = { top: { style: "medium" }, left: { style: "thin" }, bottom: { style: "thin" }, right: { style: "thin" } };
+        rTotal.getCell(c).alignment = { vertical: "middle", horizontal: c === 1 ? "left" : "center" };
+      }
+
+      pv.pageSetup = { orientation: "landscape", fitToPage: true, fitToWidth: 1, fitToHeight: 0 };
+      pv.columns = [
+        { width: 20 },
+        ...Array(employeeSheetMeta.length).fill({ width: 16 }),
+        { width: 18 },
+      ];
+
+      // === WRITE FILE ===
+      const buffer = await wb.xlsx.writeBuffer();
+      const blob = new Blob([buffer], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url; a.download = `so_y_te_${month}_cong_thuc_pivot_config.xlsx`; a.click();
+      URL.revokeObjectURL(url);
+      alert("✅ Xuất Excel: giá động qua sheet Cấu hình + Pivot + header/footer + logo!");
+    } catch (err) {
+      console.error(err);
+      alert("❌ Xuất Excel thất bại.");
+    }
+  };
 
   // ==== LOGIN UI ====
   if (!user)
     return (
       <div className="login-page">
-        <div className="login-box">
-          <h2>🔐 Đăng nhập hệ thống</h2>
-          <input value={email} onChange={(e) => setEmail(e.target.value)} placeholder="Email" />
-          <input
-            type="password"
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
-            placeholder="Mật khẩu"
-          />
-          <button onClick={login} className="btn-primary">Đăng nhập</button>
+        <div className="login-box" style={{ maxWidth: 420 }}>
+          <h2>🔐 {isSignup ? "Đăng ký tài khoản" : "Đăng nhập hệ thống"}</h2>
+          <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
+            <button onClick={() => { setIsSignup(false); setAuthMsg(""); }} className={!isSignup ? "btn-primary" : "btn-secondary"}>Đăng nhập</button>
+            <button onClick={() => { setIsSignup(true); setAuthMsg(""); }} className={isSignup ? "btn-primary" : "btn-secondary"}>Đăng ký</button>
+          </div>
+          {!isSignup ? (
+            <>
+              <input value={email} onChange={(e) => setEmail(e.target.value)} placeholder="Email" />
+              <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="Mật khẩu" onKeyDown={(e) => e.key === "Enter" && login()} />
+              <button onClick={login} className="btn-primary" disabled={loadingAuth}>{loadingAuth ? "..." : "Đăng nhập"}</button>
+              <button onClick={resetPassword} className="btn-link" style={{ marginTop: 8 }}>Quên mật khẩu?</button>
+              {authMsg && <div style={{ marginTop: 10, color: authMsg.startsWith("✅") || authMsg.startsWith("✉️") ? "#198754" : "#dc3545" }}>{authMsg}</div>}
+            </>
+          ) : (
+            <>
+              <input value={regEmail} onChange={(e) => setRegEmail(e.target.value)} placeholder="Email" />
+              <input type="password" value={regPassword} onChange={(e) => setRegPassword(e.target.value)} placeholder="Mật khẩu (≥ 6 ký tự)" />
+              <input type="password" value={regConfirm} onChange={(e) => setRegConfirm(e.target.value)} placeholder="Xác nhận mật khẩu" onKeyDown={(e) => e.key === "Enter" && register()} />
+              <button onClick={register} className="btn-success" disabled={loadingAuth}>{loadingAuth ? "..." : "Tạo tài khoản"}</button>
+              {authMsg && <div style={{ marginTop: 10, color: authMsg.startsWith("✅") ? "#198754" : "#dc3545" }}>{authMsg}</div>}
+            </>
+          )}
         </div>
       </div>
     );
@@ -787,22 +729,17 @@ export default function SalaryApp() {
         <input
           type="number"
           value={pricePerBook}
-          onChange={(e) => setPricePerBook(parseFloat(e.target.value) || 0)}
+          onChange={(e) => setPricePerBook(Number.isFinite(parseFloat(e.target.value)) ? parseFloat(e.target.value) : 0)}
           className="short-input"
         />
-        <button onClick={exportExcel} className="btn-secondary">⬇️ Xuất Excel</button>
+        <button onClick={exportExcel} className="btn-secondary">⬇️ Xuất Excel (giá động + Pivot)</button>
       </div>
 
-      {/* Danh sách nhân viên */}
+      {/* Nhân viên */}
       <div className="section">
         <h2>👥 Danh sách nhân viên</h2>
         <div className="add-row">
-          <input
-            placeholder="Tên nhân viên (VD: Anh, Bình, Chi...)"
-            value={newEmployeeName}
-            onChange={(e) => setNewEmployeeName(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && addEmployee()}
-          />
+          <input placeholder="Tên nhân viên" value={newEmployeeName} onChange={(e) => setNewEmployeeName(e.target.value)} onKeyDown={(e) => e.key === "Enter" && addEmployee()} />
           <button onClick={addEmployee} className="btn-primary">➕ Thêm NV</button>
         </div>
         <div className="tag-list">
@@ -815,92 +752,23 @@ export default function SalaryApp() {
         </div>
       </div>
 
-      {/* Thống kê theo nhân viên */}
-      {employeeStats.length > 0 && (
-        <div className="section stats-section">
-          <h2>📊 Thống kê theo nhân viên</h2>
-          <div className="employee-stats-grid">
-            {employeeStats.map((stat) => (
-              <div key={stat.employee} className="stat-card">
-                <div className="stat-header">
-                  <strong>👤 {stat.employee}</strong>
-                </div>
-                <div className="stat-body">
-                  <div><b>Trường:</b> {stat.schools.length > 0 ? stat.schools.join(", ") : "Chưa có"}</div>
-                  <div><b>Số lớp:</b> {stat.classCount} lớp</div>
-                  <div style={{ marginTop: '8px', paddingTop: '8px', borderTop: '1px solid #e0e0e0' }}>
-                    <b>Danh sách lớp:</b>
-                    {stat.schools.length > 0 ? (
-                      <div style={{ marginTop: '5px' }}>
-                        {stat.schools.map((school) => {
-                          const classes = stat.classesBySchool[school] || [];
-                          if (classes.length === 0) return null;
-                          return (
-                            <div key={school} style={{ marginTop: '4px', fontSize: '13px', color: '#555' }}>
-                              <strong style={{ color: '#007bff' }}>{school}:</strong> {classes.sort().join(", ")}
-                            </div>
-                          );
-                        })}
-                      </div>
-                    ) : (
-                      <span style={{ color: '#999' }}> Chưa có</span>
-                    )}
-                  </div>
-                  <div style={{ marginTop: '8px', paddingTop: '8px', borderTop: '1px solid #e0e0e0' }}>
-                    <div><b>Tổng sổ:</b> {stat.totalBooks} sổ</div>
-                    <div><b>Tiền:</b> {formatVND(Math.round(stat.totalBooks * pricePerBook * 1000))}</div>
-                  </div>
-                </div>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {/* Danh sách trường học */}
+      {/* Trường & Lớp */}
       <div className="section">
         <h2>🏫 Danh sách trường học</h2>
         <div className="add-row">
-          {schools.length > 0 ? (
+          {schools.length > 0 && (
             <>
-              <select 
-                value={selectedSchoolForClass} 
-                onChange={(e) => {
-                  setSelectedSchoolForClass(e.target.value);
-                  setNewSchoolName(""); // Clear text input when using dropdown
-                }}
-                style={{ minWidth: '200px' }}
-              >
+              <select value={selectedSchoolForClass} onChange={(e) => { setSelectedSchoolForClass(e.target.value); setNewSchoolName(""); }} style={{ minWidth: 200 }}>
                 <option value="">--Chọn trường (hoặc gõ mới)--</option>
-                {schools.map((s) => (
-                  <option key={s} value={s}>{s}</option>
-                ))}
+                {schools.map((s) => <option key={s} value={s}>{s}</option>)}
               </select>
-              <span style={{ margin: '0 5px', color: '#666' }}>hoặc</span>
+              <span style={{ margin: "0 6px", color: "#666" }}>hoặc</span>
             </>
-          ) : null}
-          <input
-            placeholder="Tên trường (VD: TH72, TH73...)"
-            value={newSchoolName}
-            onChange={(e) => {
-              setNewSchoolName(e.target.value);
-              setSelectedSchoolForClass(""); // Clear dropdown when typing
-            }}
-            onKeyDown={(e) => e.key === "Enter" && addClass()}
-          />
-          <input
-            placeholder="Tên lớp (VD: 1A, 2B...)"
-            value={newClassName}
-            onChange={(e) => setNewClassName(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && addClass()}
-          />
+          )}
+          <input placeholder="Tên trường" value={newSchoolName} onChange={(e) => { setNewSchoolName(e.target.value); setSelectedSchoolForClass(""); }} onKeyDown={(e) => e.key === "Enter" && addClass()} />
+          <input placeholder="Tên lớp (VD: 1A, 2B...)" value={newClassName} onChange={(e) => setNewClassName(e.target.value)} onKeyDown={(e) => e.key === "Enter" && addClass()} />
           <button onClick={addClass} className="btn-primary">➕ Thêm lớp</button>
         </div>
-        {selectedSchoolForClass && (
-          <p style={{ marginTop: '8px', fontSize: '14px', color: '#28a745', fontStyle: 'italic' }}>
-            ✓ Đang thêm lớp cho trường: <strong>{selectedSchoolForClass}</strong>
-          </p>
-        )}
         <div className="tag-list">
           {classes.map((c) => (
             <div key={c.id} className="tag class-tag">
@@ -911,103 +779,55 @@ export default function SalaryApp() {
         </div>
       </div>
 
-      {/* Nhập sổ chi tiết theo đợt */}
+      {/* Nhập sổ */}
       <div className="section">
         <h2>📝 Nhập sổ chi tiết theo đợt</h2>
         <div className="form-row entry-form">
           <label>Nhân viên:</label>
           <select value={selectedEmployee} onChange={(e) => setSelectedEmployee(e.target.value)}>
             <option value="">--Chọn--</option>
-            {employees.map((emp) => (
-              <option key={emp.id} value={emp.name}>{emp.name}</option>
-            ))}
+            {employees.map((emp) => <option key={emp.id} value={emp.name}>{emp.name}</option>)}
           </select>
-          
+
           <label>Ngày:</label>
           <select value={selectedDay} onChange={(e) => setSelectedDay(e.target.value)}>
             <option value="">--Ngày--</option>
-            {Array.from({ length: 31 }, (_, i) => (
-              <option key={i + 1} value={i + 1}>{i + 1}</option>
-            ))}
+            {Array.from({ length: daysInMonth }, (_, i) => <option key={i + 1} value={i + 1}>{i + 1}</option>)}
           </select>
-          
+
           <label>Trường:</label>
-          <select 
-            value={selectedSchool} 
-            onChange={(e) => {
-              setSelectedSchool(e.target.value);
-              setInputClass(""); // Reset class when school changes
-            }}
-          >
+          <select value={selectedSchool} onChange={(e) => { setSelectedSchool(e.target.value); setInputClass(""); }}>
             <option value="">--Chọn--</option>
-            {schools.map((s) => (
-              <option key={s} value={s}>{s}</option>
-            ))}
+            {schools.map((s) => <option key={s} value={s}>{s}</option>)}
           </select>
-          
+
           <label>Lớp:</label>
           {selectedSchool ? (
-            <select
-              value={inputClass}
-              onChange={(e) => setInputClass(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && addEntry()}
-            >
+            <select value={inputClass} onChange={(e) => setInputClass(e.target.value)} onKeyDown={(e) => e.key === "Enter" && addEntry()}>
               <option value="">--Chọn lớp--</option>
-              {classesForSelectedSchool.map((className) => (
-                <option key={className} value={className}>{className}</option>
-              ))}
+              {classes.filter((c) => c.school === selectedSchool).map((c) => <option key={c.id} value={c.name}>{c.name}</option>)}
             </select>
-          ) : (
-            <select disabled>
-              <option>Vui lòng chọn trường trước</option>
-            </select>
-          )}
-          
+          ) : <select disabled><option>Chọn trường trước</option></select>}
+
           <label>Số sổ:</label>
-          <input
-            type="number"
-            placeholder="Số sổ"
-            value={inputBooks}
-            onChange={(e) => setInputBooks(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && addEntry()}
-          />
-          
+          <input type="number" value={inputBooks} onChange={(e) => setInputBooks(e.target.value)} onKeyDown={(e) => e.key === "Enter" && addEntry()} />
+
           <label>Ghi chú:</label>
-          <input
-            type="text"
-            placeholder="Đợt 1..."
-            value={inputNote}
-            onChange={(e) => setInputNote(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && addEntry()}
-          />
-          
-          <div></div>
+          <input value={inputNote} onChange={(e) => setInputNote(e.target.value)} onKeyDown={(e) => e.key === "Enter" && addEntry()} />
+
+          <div />
           <button onClick={addEntry} className="btn-success">➕ Thêm</button>
         </div>
 
-        {/* Lịch sử nhập sổ */}
+        {/* Lịch sử */}
         <div className="entries-history">
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px' }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
             <h3>Lịch sử nhập sổ ({entries.length} đợt)</h3>
             {selectedEntries.size > 0 && (
-              <div style={{ display: 'flex', gap: '10px', alignItems: 'center' }}>
-                <span style={{ color: '#dc3545', fontWeight: 'bold' }}>
-                  Đã chọn: {selectedEntries.size} đợt
-                </span>
-                <button 
-                  onClick={deleteSelectedEntries}
-                  className="btn-danger"
-                  title="Xóa các đợt đã chọn"
-                >
-                  🗑️ Xóa ({selectedEntries.size})
-                </button>
-                <button 
-                  onClick={() => setSelectedEntries(new Set())}
-                  className="btn-secondary"
-                  style={{ padding: '4px 10px', fontSize: '12px' }}
-                >
-                  Bỏ chọn
-                </button>
+              <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+                <span style={{ color: "#dc3545", fontWeight: "bold" }}>Đã chọn: {selectedEntries.size}</span>
+                <button onClick={deleteSelectedEntries} className="btn-danger">🗑️ Xóa ({selectedEntries.size})</button>
+                <button onClick={() => setSelectedEntries(new Set())} className="btn-secondary" style={{ padding: "4px 10px", fontSize: 12 }}>Bỏ chọn</button>
               </div>
             )}
           </div>
@@ -1015,13 +835,8 @@ export default function SalaryApp() {
             <table className="history-table">
               <thead>
                 <tr>
-                  <th style={{ width: '40px' }}>
-                    <input
-                      type="checkbox"
-                      checked={selectedEntries.size > 0 && selectedEntries.size === entries.length}
-                      onChange={selectAllEntries}
-                      title="Chọn tất cả"
-                    />
+                  <th style={{ width: 40 }}>
+                    <input type="checkbox" checked={selectedEntries.size > 0 && selectedEntries.size === entries.length} onChange={selectAllEntries} />
                   </th>
                   <th>NV</th>
                   <th>Ngày</th>
@@ -1034,186 +849,139 @@ export default function SalaryApp() {
               </thead>
               <tbody>
                 {entries.map((entry) => (
-                  <tr 
-                    key={entry.id}
-                    style={{ 
-                      backgroundColor: selectedEntries.has(entry.id) ? '#fff3cd' : 'inherit'
-                    }}
-                  >
-                    <td>
-                      <input
-                        type="checkbox"
-                        checked={selectedEntries.has(entry.id)}
-                        onChange={() => toggleSelectEntry(entry.id)}
-                      />
-                    </td>
+                  <tr key={entry.id} style={{ backgroundColor: selectedEntries.has(entry.id) ? "#fff3cd" : "inherit" }}>
+                    <td><input type="checkbox" checked={selectedEntries.has(entry.id)} onChange={() => toggleSelectEntry(entry.id)} /></td>
                     <td>{entry.employee}</td>
                     <td>{entry.day}</td>
                     <td>{entry.school}</td>
                     <td>{entry.class}</td>
-                    <td 
-                      onClick={() => editEntry(entry)}
-                      style={{ cursor: 'pointer', fontWeight: 'bold', color: '#007bff' }}
-                      title="Click để sửa số sổ"
-                    >
-                      {entry.books}
-                    </td>
+                    <td onClick={() => editEntry(entry)} style={{ cursor: "pointer", fontWeight: "bold", color: "#007bff" }}>{entry.books}</td>
                     <td>{entry.note || "-"}</td>
                     <td>
-                      <div style={{ display: 'flex', gap: '5px', justifyContent: 'center' }}>
-                        <button 
-                          onClick={() => editEntry(entry)} 
-                          className="btn-edit"
-                          title="Sửa"
-                        >
-                          ✏️
-                        </button>
-                        <button 
-                          onClick={() => deleteEntry(entry.id)} 
-                          className="btn-delete"
-                          title="Xóa"
-                        >
-                          🗑️
-                        </button>
+                      <div style={{ display: "flex", gap: 6, justifyContent: "center" }}>
+                        <button onClick={() => editEntry(entry)} className="btn-edit">✏️</button>
+                        <button onClick={() => deleteEntry(entry.id)} className="btn-delete">🗑️</button>
                       </div>
                     </td>
                   </tr>
                 ))}
+                {entries.length === 0 && <tr><td colSpan="8" style={{ textAlign: "center", color: "#888" }}>Chưa có dữ liệu</td></tr>}
               </tbody>
             </table>
           </div>
         </div>
       </div>
 
-      {/* Bảng tổng theo từng nhân viên */}
-      {Object.keys(employeeSummaryTables).length > 0 && (
-        <>
-          {Object.keys(employeeSummaryTables).map((empName) => {
-            const empTable = employeeSummaryTables[empName];
-            const empTotal = empTable.reduce((sum, row) => {
-              return sum + row.days.reduce((a, b) => a + b, 0);
-            }, 0);
-            const empMoney = Math.round(empTotal * pricePerBook * 1000);
-            
-            return (
-              <div key={empName} className="section employee-table-section">
-                <h2>📊 Bảng tổng - Nhân viên: <strong style={{color: '#007bff'}}>{empName}</strong></h2>
-                <p className="hint-text">💡 Click vào số trong ô để xem chi tiết</p>
-                <div className="table-container">
-                  <table>
-                    <thead>
-                      <tr>
-                        <th>Trường</th>
-                        <th>Lớp</th>
-                        {Array.from({ length: 31 }, (_, i) => <th key={i}>{i + 1}</th>)}
-                        <th>Tổng</th>
-                        <th>Tiền (VND)</th>
+      {/* Bảng tổng theo nhân viên */}
+      {Object.keys(employeeSummaryTables).map((empName) => {
+        const empTable = employeeSummaryTables[empName];
+        const empTotal = empTable.reduce((s, r) => s + r.days.reduce((a, b) => a + b, 0), 0);
+        const empMoney = Math.round(empTotal * pricePerBook * 1000);
+        return (
+          <div key={empName} className="section employee-table-section">
+            <h2>📊 Bảng tổng - Nhân viên: <strong style={{ color: "#007bff" }}>{empName}</strong></h2>
+            <p className="hint-text">💡 Click số trong ô để xem chi tiết</p>
+            <div className="table-container">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Trường</th>
+                    <th>Lớp</th>
+                    {Array.from({ length: 31 }, (_, i) => <th key={i}>{i + 1}</th>)}
+                    <th>Tổng</th>
+                    <th>Tiền (VND)</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {empTable.map((row, idx) => {
+                    const total = row.days.reduce((a, b) => a + b, 0);
+                    const money = Math.round(total * pricePerBook * 1000);
+                    return (
+                      <tr key={idx}>
+                        <td><strong>{row.school}</strong></td>
+                        <td>{row.class}</td>
+                        {row.days.map((v, di) => (
+                          <td key={di} onClick={() => v > 0 && openDetailModal(di + 1, row.school)} className={v > 0 ? "clickable-cell" : ""}>
+                            {v > 0 ? v : "-"}
+                          </td>
+                        ))}
+                        <td><strong>{total}</strong></td>
+                        <td>{formatVND(money)}</td>
                       </tr>
-                    </thead>
-                    <tbody>
-                      {empTable.map((row, idx) => {
-                        const total = row.days.reduce((a, b) => a + b, 0);
-                        const money = Math.round(total * pricePerBook * 1000);
-                        return (
-                          <tr key={idx}>
-                            <td><strong>{row.school}</strong></td>
-                            <td>{row.class}</td>
-                            {row.days.map((books, dayIdx) => (
-                              <td
-                                key={dayIdx}
-                                onClick={() => books > 0 && openDetailModal(dayIdx + 1, row.school)}
-                                className={books > 0 ? "clickable-cell" : ""}
-                                title={books > 0 ? `Click để xem chi tiết ngày ${dayIdx + 1}` : ""}
-                              >
-                                {books > 0 ? books : "-"}
-                              </td>
-                            ))}
-                            <td><strong>{total}</strong></td>
-                            <td>{formatVND(money)}</td>
-                          </tr>
-                        );
-                      })}
-                      <tr className="total-row">
-                        <td colSpan="2"><strong>TỔNG CỘNG</strong></td>
-                        {Array.from({ length: 31 }, (_, i) => {
-                          const dayTotal = empTable.reduce((sum, row) => sum + row.days[i], 0);
-                          return <td key={i}><strong>{dayTotal > 0 ? dayTotal : ""}</strong></td>
-                        })}
-                        <td><strong>{empTotal}</strong></td>
-                        <td><strong>{formatVND(empMoney)}</strong></td>
-                      </tr>
-                    </tbody>
-                  </table>
-                </div>
-              </div>
-            );
-          })}
-        </>
-      )}
-
-      {/* Bảng tổng chung (nếu không có filter nhân viên) */}
-      {Object.keys(employeeSummaryTables).length === 0 && (
-        <div className="section">
-          <h2>📊 Bảng tổng</h2>
-          <p className="hint-text">💡 Click vào số trong ô để xem chi tiết</p>
-          <div className="table-container">
-            <table>
-              <thead>
-                <tr>
-                  <th>Trường</th>
-                  <th>Lớp</th>
-                  {Array.from({ length: 31 }, (_, i) => <th key={i}>{i + 1}</th>)}
-                  <th>Tổng</th>
-                  <th>Tiền (VND)</th>
-                </tr>
-              </thead>
-              <tbody>
-                {summaryTable.map((row, idx) => {
-                  const total = row.days.reduce((a, b) => a + b, 0);
-                  const money = Math.round(total * pricePerBook * 1000);
-                  return (
-                    <tr key={idx}>
-                      <td><strong>{row.school}</strong></td>
-                      <td>{row.class}</td>
-                      {row.days.map((books, dayIdx) => (
-                        <td
-                          key={dayIdx}
-                          onClick={() => books > 0 && openDetailModal(dayIdx + 1, row.school)}
-                          className={books > 0 ? "clickable-cell" : ""}
-                          title={books > 0 ? `Click để xem chi tiết ngày ${dayIdx + 1}` : ""}
-                        >
-                          {books > 0 ? books : "-"}
-                        </td>
-                      ))}
-                      <td><strong>{total}</strong></td>
-                      <td>{formatVND(money)}</td>
-                    </tr>
-                  );
-                })}
-                {summaryTable.length > 0 && (
+                    );
+                  })}
                   <tr className="total-row">
                     <td colSpan="2"><strong>TỔNG CỘNG</strong></td>
                     {Array.from({ length: 31 }, (_, i) => {
-                      const dayTotal = summaryTable.reduce((sum, row) => sum + row.days[i], 0);
-                      return <td key={i}><strong>{dayTotal > 0 ? dayTotal : ""}</strong></td>
+                      const dayTotal = empTable.reduce((s, r) => s + r.days[i], 0);
+                      return <td key={i}><strong>{dayTotal || ""}</strong></td>;
                     })}
-                    <td><strong>{totalBooks}</strong></td>
-                    <td><strong>{formatVND(totalMoney)}</strong></td>
+                    <td><strong>{empTotal}</strong></td>
+                    <td><strong>{formatVND(empMoney)}</strong></td>
                   </tr>
-                )}
-              </tbody>
-            </table>
+                </tbody>
+              </table>
+            </div>
           </div>
-        </div>
-      )}
+        );
+      })}
 
-      {/* Summary - Tổng tất cả nhân viên */}
+      {/* Bảng tổng chung */}
+      <div className="section">
+        <h2>📊 Bảng tổng</h2>
+        <p className="hint-text">💡 Click vào số trong ô để xem chi tiết</p>
+        <div className="table-container">
+          <table>
+            <thead>
+              <tr>
+                <th>Trường</th>
+                <th>Lớp</th>
+                {Array.from({ length: 31 }, (_, i) => <th key={i}>{i + 1}</th>)}
+                <th>Tổng</th>
+                <th>Tiền (VND)</th>
+              </tr>
+            </thead>
+            <tbody>
+              {summaryTable.map((row, idx) => {
+                const total = row.days.reduce((a, b) => a + b, 0);
+                const money = Math.round(total * pricePerBook * 1000);
+                return (
+                  <tr key={idx}>
+                    <td><strong>{row.school}</strong></td>
+                    <td>{row.class}</td>
+                    {row.days.map((v, di) => (
+                      <td key={di} onClick={() => v > 0 && openDetailModal(di + 1, row.school)} className={v > 0 ? "clickable-cell" : ""}>
+                        {v > 0 ? v : "-"}
+                      </td>
+                    ))}
+                    <td><strong>{total}</strong></td>
+                    <td>{formatVND(money)}</td>
+                  </tr>
+                );
+              })}
+              {summaryTable.length > 0 && (
+                <tr className="total-row">
+                  <td colSpan="2"><strong>TỔNG CỘNG</strong></td>
+                  {Array.from({ length: 31 }, (_, i) => {
+                    const dayTotal = summaryTable.reduce((s, r) => s + r.days[i], 0);
+                    return <td key={i}><strong>{dayTotal || ""}</strong></td>;
+                  })}
+                  <td><strong>{totalBooks}</strong></td>
+                  <td><strong>{formatVND(totalMoney)}</strong></td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      {/* Summary */}
       <div className="summary">
         <div><b>Tổng số sổ (tất cả):</b> {totalBooks}</div>
         <div><b>Tổng tiền (tất cả):</b> {formatVND(totalMoney)}</div>
       </div>
 
-      {/* Modal Chi tiết */}
+      {/* Modal */}
       {modalDetailData && (
         <div className="modal-overlay" onClick={closeDetailModal}>
           <div className="modal-content" onClick={(e) => e.stopPropagation()}>
@@ -1243,7 +1011,7 @@ export default function SalaryApp() {
                   <tr className="total-row">
                     <td colSpan="2"><strong>Tổng</strong></td>
                     <td><strong>{modalDetailData.totalBooks}</strong></td>
-                    <td></td>
+                    <td />
                   </tr>
                 </tbody>
               </table>
